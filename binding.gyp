@@ -1,8 +1,8 @@
 {
   'targets': [
     {
-      'target_name': 'sword',
-      'sources': [ 'sword.cc' ],
+      'target_name': 'sword-addon',
+      'sources': [ 'sword-addon.cc' ],
       'conditions': [
         ['OS=="linux"',
           {

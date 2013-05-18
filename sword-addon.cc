@@ -31,6 +31,15 @@
 using namespace v8;
 using namespace sword;
 
+// Forward declaration. Usually, you do this in a header file.
+Handle<Value> SyncRemoteSources(const Arguments& args);
+void AsyncSyncRemoteSources(uv_work_t* req);
+void AfterSyncRemoteSources(uv_work_t* req);
+
+Handle<Value> GetRemoteSources(const Arguments& args);
+void AsyncGetRemoteSources(uv_work_t* req);
+void AfterGetRemoteSources(uv_work_t* req);
+
 SWMgr *displayLibrary = 0;
 SWMgr *searchLibrary = 0;
 
@@ -41,6 +50,13 @@ std::string verseView = "";
 std::string remoteSource = "";
 std::string modName = "";
 int searchType = -2;
+
+struct Baton {
+    Persistent<Function> callback;
+    bool error;
+    std::string error_message;
+    std::string result;
+};
 
 std::string convertString(std::string s) {
     std::stringstream ss;
@@ -108,7 +124,7 @@ class MyStatusReporter : public StatusReporter {
         }
 };
 
-void init() {
+void initInstallMgr() {
     if (!mgr) {
         mgr = new SWMgr();
 
@@ -159,46 +175,16 @@ void createBasicConfig(bool enableRemote, bool addCrossWire) {
 }
 
 void initConfig() {
-    init();
+    initInstallMgr();
     bool enable = true; //installMgr->isUserDisclaimerConfirmed();
     createBasicConfig(enable, true);
 }
 
-void *syncConfig(void *foo) {
-//int syncConfig() {
-    std::stringstream sources;
-    init();
-
-    // be sure we have at least some config file already out there
-    if (!FileMgr::existsFile(confPath.c_str())) {
-        createBasicConfig(true, true);
-        finish(1); // cleanup and don't exit
-        init();    // re-init with InstallMgr which uses our new config
-    }
-
-    if (!installMgr->refreshRemoteSourceConfiguration())
-        sources << "{\"returnValue\": true}";
-    else
-        sources << "{\"returnValue\": false}";
-
-    return 0;
-
-   //TODO: need a callback here to report if the the sync was successfull or not
-}
 /*
-PDL_bool callSyncConfig(PDL_JSParameters *parms) {
-    //initConfig();
-    pthread_t thread1;
-    int  iret1;
-
-    char *foobar;
-
-    iret1 = pthread_create( &thread1, NULL, syncConfig, (void *) foobar);
-}
 
 PDL_bool uninstallModule(PDL_JSParameters *parms) {
     //void uninstallModule(const char *modName) {
-    init();
+    initInstallMgr();
     const char* modName = PDL_GetJSParamString(parms, 0);
     std::stringstream out;
     SWModule *module;
@@ -223,7 +209,7 @@ PDL_bool uninstallModule(PDL_JSParameters *parms) {
 
 
 PDL_bool listRemoteSources(PDL_JSParameters *parms) {
-    init();
+    initInstallMgr();
     std::stringstream sources;
     sources << "[";
     for (InstallSourceMap::iterator it = installMgr->sources.begin(); it != installMgr->sources.end(); it++) {
@@ -249,7 +235,7 @@ PDL_bool listRemoteSources(PDL_JSParameters *parms) {
 void *refreshRemoteSource(void *foo) {
 //void refreshRemoteSource(const char *sourceName) {
     std::stringstream out;
-    init();
+    initInstallMgr();
     InstallSourceMap::iterator source = installMgr->sources.find(remoteSource.c_str());
     if (source == installMgr->sources.end()) {
         out << "{\"returnValue\": false, \"message\": \"Couldn't find remote source: " << remoteSource << "\"}";
@@ -282,7 +268,7 @@ PDL_bool callRefreshRemoteSource(PDL_JSParameters *parms) {
 
 
 void listModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false) {
-    init();
+    initInstallMgr();
     std::stringstream out;
     SWModule *module;
     if (!otherMgr) otherMgr = mgr;
@@ -326,7 +312,7 @@ PDL_bool remoteListModules(PDL_JSParameters *parms) {
     bool onlyNewAndUpdated = false;
     const char* sourceName = PDL_GetJSParamString(parms, 0);
 
-    init();
+    initInstallMgr();
     InstallSourceMap::iterator source = installMgr->sources.find(sourceName);
     if (source == installMgr->sources.end()) {
         PDL_JSException(parms, "remoteListModules: Couldn't find remote source");
@@ -344,7 +330,7 @@ PDL_bool getModuleDetails (PDL_JSParameters *parms) {
     const char* sourceName = PDL_GetJSParamString(parms, 1);
     std::stringstream mod;
 
-    init();
+    initInstallMgr();
     InstallSourceMap::iterator source = installMgr->sources.find(sourceName);
     if (source == installMgr->sources.end()) {
         PDL_JSException(parms, "remoteListModules: Couldn't find remote source");
@@ -393,7 +379,7 @@ void localDirListModules(const char *dir) {
 
 void *remoteInstallModule(void *foo) {
 //void remoteInstallModule(const char *sourceName, const char *modName) {
-    init();
+    initInstallMgr();
     std::stringstream out;
     InstallSourceMap::iterator source = installMgr->sources.find(remoteSource.c_str());
     if (source == installMgr->sources.end()) {
@@ -442,7 +428,7 @@ PDL_bool callRemoteInstallModule(PDL_JSParameters *parms) {
 
 
 void localDirInstallModule(const char *dir, const char *modName) {
-    init();
+    initInstallMgr();
     SWMgr lmgr(dir);
     SWModule *module;
     ModMap::iterator it = lmgr.Modules.find(modName);
@@ -495,37 +481,117 @@ Handle<Value> getModules(const Arguments& args) {
     return scope.Close(Undefined());
 }
 
-Handle<Value> syncRemoteSources(const Arguments& args) {
+Handle<Value> SyncRemoteSources(const Arguments& args) {
     HandleScope scope;
 
-    std::stringstream sources;
-    init();
+    if (!args[0]->IsFunction()) {
+        return ThrowException(Exception::TypeError(
+            String::New("First argument must be a callback function")));
+    }
+
+    Local<Function> callback = Local<Function>::Cast(args[0]);
+
+    // The baton holds our custom status information for this asynchronous call,
+    // like the callback function we want to call when returning to the main
+    // thread and the status information.
+    Baton* baton = new Baton();
+    baton->error = false;
+    baton->callback = Persistent<Function>::New(callback);
+
+    // This creates the work request struct.
+    uv_work_t *req = new uv_work_t();
+    req->data = baton;
+
+    // Schedule our work request with libuv. Here you can specify the functions
+    // that should be executed in the threadpool and back in the main thread
+    // after the threadpool function completed.
+    int status = uv_queue_work(uv_default_loop(), req, AsyncSyncRemoteSources,
+                               (uv_after_work_cb)AfterSyncRemoteSources);
+    assert(status == 0);
+
+    return Undefined();
+}
+
+void AsyncSyncRemoteSources(uv_work_t* req) {
+    Baton* baton = static_cast<Baton*>(req->data);
+
+    std::string sources;
+    initInstallMgr();
 
     // be sure we have at least some config file already out there
     if (!FileMgr::existsFile(confPath.c_str())) {
         createBasicConfig(true, true);
         finish(1); // cleanup and don't exit
-        init();    // re-init with InstallMgr which uses our new config
+        initInstallMgr();    // re-initInstallMgr with InstallMgr which uses our new config
     }
 
     if (!installMgr->refreshRemoteSourceConfiguration())
-        sources << "{\"returnValue\": true, \"message\": \"successfully sync remote source configuration.\"}";
-    else
-        sources << "{\"returnValue\": false, \"message\": \"Could not sync remote source configuration. Check your Internet connection!\"}";
-
-    Local<Function> cb = Local<Function>::Cast(args[0]);
-    const unsigned argc = 1;
-
-    Local<Value> argv[argc] = { Local<Value>::New(String::New(sources.str().c_str())) };
-    cb->Call(Context::GetCurrent()->Global(), argc, argv);
-
-    return scope.Close(Undefined());
+        sources = "{\"message\": \"successfully sync remote source configuration.\"}";
+    else {
+        baton->error_message = "Could not sync remote source configuration. Check your Internet connection!";
+        baton->error = true;
+    }
+    baton->result = sources;
 }
 
-Handle<Value> getRemoteSources(const Arguments& args) {
+void AfterSyncRemoteSources(uv_work_t* req) {
+    HandleScope scope;
+    Baton* baton = static_cast<Baton*>(req->data);
+
+    if (baton->error) {
+        Local<Value> err = Exception::Error(String::New(baton->error_message.c_str()));
+        const unsigned argc = 1;
+        Local<Value> argv[argc] = { err };
+        TryCatch try_catch;
+        baton->callback->Call(Context::GetCurrent()->Global(), argc, argv);
+        if (try_catch.HasCaught()) {
+            node::FatalException(try_catch);
+        }
+    } else {
+        const unsigned argc = 2;
+        Local<Value> argv[argc] = {
+            Local<Value>::New(Null()),
+            Local<Value>::New(String::New(baton->result.c_str()))
+        };
+        TryCatch try_catch;
+        baton->callback->Call(Context::GetCurrent()->Global(), argc, argv);
+        if (try_catch.HasCaught()) {
+            node::FatalException(try_catch);
+        }
+    }
+    baton->callback.Dispose();
+    delete baton;
+    delete req;
+}
+
+Handle<Value> GetRemoteSources(const Arguments& args) {
     HandleScope scope;
 
-    init();
+    if (!args[0]->IsFunction()) {
+        return ThrowException(Exception::TypeError(
+            String::New("First argument must be a callback function")));
+    }
+
+    Local<Function> callback = Local<Function>::Cast(args[0]);
+
+    Baton* baton = new Baton();
+    baton->error = false;
+    baton->callback = Persistent<Function>::New(callback);
+
+    uv_work_t *req = new uv_work_t();
+    req->data = baton;
+
+    int status = uv_queue_work(uv_default_loop(), req, AsyncGetRemoteSources,
+                               (uv_after_work_cb)AfterGetRemoteSources);
+    assert(status == 0);
+
+    return Undefined();
+}
+
+void AsyncGetRemoteSources(uv_work_t* req) {
+    Baton* baton = static_cast<Baton*>(req->data);
+
+    initInstallMgr();
     std::stringstream sources;
     sources << "[";
     for (InstallSourceMap::iterator it = installMgr->sources.begin(); it != installMgr->sources.end(); it++) {
@@ -539,97 +605,38 @@ Handle<Value> getRemoteSources(const Arguments& args) {
     }
     sources << "]";
 
-    Local<Function> cb = Local<Function>::Cast(args[0]);
-    const unsigned argc = 1;
+    baton->result = sources.str();
 
-    Local<Value> argv[argc] = { Local<Value>::New(String::New(sources.str().c_str())) };
-    cb->Call(Context::GetCurrent()->Global(), argc, argv);
-
-    return scope.Close(Undefined());
 }
 
-/* Handle<Value> getBooknames(const Arguments& args) {
+void AfterGetRemoteSources(uv_work_t* req) {
     HandleScope scope;
+    Baton* baton = static_cast<Baton*>(req->data);
 
-    if (args.Length() < 2) {
-        ThrowException(Exception::TypeError(String::New("Wrong number of arguments")));
-        return scope.Close(Undefined());
-    }
-
-    if (!args[0]->IsString()) {
-        ThrowException(Exception::TypeError(String::New("Wrong argument.")));
-        return scope.Close(Undefined());
-    }
-
-    v8::String::Utf8Value param1(args[0]->ToString());
-    std::string moduleName = std::string(*param1);
-
-    std::stringstream bnames;
-    std::string bnStr;
-
-    SWModule *module = displayLibrary->getModule(moduleName.c_str());
-    if (!module) {
-        PDL_JSException(parms, "getBooknames: Couldn't find Module");
-        return PDL_TRUE;  // assert we found the module
-    }
-
-    VerseKey *vkey = dynamic_cast<VerseKey *>(module->getKey());
-    if (!vkey) {
-        PDL_JSException(parms, "getBooknames: Couldn't find verse!");
-        return PDL_TRUE;    // assert our module uses verses
-    }
-    VerseKey *vkey(module->getKey());
-    //VerseKey &vk = *vkey;
-
-    bnames << "[";
-    for (int b = 0; b < 2; b++) {
-        vk.setTestament(b+1);
-        for (int i = 0; i < vk.BMAX[b]; i++) {
-            vk.setBook(i+1);
-            bnames << "{\"name\": \"" << convertString(vk.getBookName()) << "\", ";
-            bnames << "\"abbrev\": \"" << convertString(vk.getBookAbbrev()) << "\", ";
-            bnames << "\"cmax\": \"" << vk.getChapterMax() << "\"}";
-            if (i+1 == vk.BMAX[b] && b == 1) {
-                bnames << "]";
-            } else {
-                bnames << ", ";
-            }
+    if (baton->error) {
+        Local<Value> err = Exception::Error(String::New(baton->error_message.c_str()));
+        const unsigned argc = 1;
+        Local<Value> argv[argc] = { err };
+        TryCatch try_catch;
+        baton->callback->Call(Context::GetCurrent()->Global(), argc, argv);
+        if (try_catch.HasCaught()) {
+            node::FatalException(try_catch);
+        }
+    } else {
+        const unsigned argc = 2;
+        Local<Value> argv[argc] = {
+            Local<Value>::New(Null()),
+            Local<Value>::New(String::New(baton->result.c_str()))
+        };
+        TryCatch try_catch;
+        baton->callback->Call(Context::GetCurrent()->Global(), argc, argv);
+        if (try_catch.HasCaught()) {
+            node::FatalException(try_catch);
         }
     }
-
-    Local<Function> cb = Local<Function>::Cast(args[1]);
-    const unsigned argc = 1;
-
-    Local<Value> argv[argc] = { Local<Value>::New(String::New(bnames.str().c_str())) };
-    cb->Call(Context::GetCurrent()->Global(), argc, argv);
-
-    return scope.Close(Undefined());
-}*/
-
-Handle<Value> getRemoteSources(const Arguments& args) {
-    HandleScope scope;
-
-    init();
-    std::stringstream sources;
-    sources << "[";
-    for (InstallSourceMap::iterator it = installMgr->sources.begin(); it != installMgr->sources.end(); it++) {
-        if (it != installMgr->sources.begin()) {
-            sources << ", ";
-        }
-        sources << "{\"name\": \"" << it->second->caption << "\", ";
-        sources << "\"type\": \"" << it->second->type << "\", ";
-        sources << "\"source\": \"" << it->second->source << "\", ";
-        sources << "\"directory\": \"" << it->second->directory << "\"}";
-    }
-    sources << "]";
-
-    Local<Function> cb = Local<Function>::Cast(args[0]);
-    const unsigned argc = 1;
-
-    Local<Value> argv[argc] = { Local<Value>::New(String::New(sources.str().c_str())) };
-    cb->Call(Context::GetCurrent()->Global(), argc, argv);
-
-    return scope.Close(Undefined());
+    baton->callback.Dispose();
+    delete baton;
+    delete req;
 }
 
 void Init(Handle<Object> exports, Handle<Object> module) {
@@ -637,12 +644,12 @@ void Init(Handle<Object> exports, Handle<Object> module) {
     exports->Set(String::NewSymbol("getModules"),
         FunctionTemplate::New(getModules)->GetFunction());
     exports->Set(String::NewSymbol("syncRemoteSources"),
-        FunctionTemplate::New(syncRemoteSources)->GetFunction());
+        FunctionTemplate::New(SyncRemoteSources)->GetFunction());
     exports->Set(String::NewSymbol("getRemoteSources"),
-        FunctionTemplate::New(getRemoteSources)->GetFunction());
+        FunctionTemplate::New(GetRemoteSources)->GetFunction());
     //getBooknames
     /*exports->Set(String::NewSymbol("getBooknames"),
         FunctionTemplate::New(getBooknames)->GetFunction());*/
 }
 
-NODE_MODULE(sword, Init)
+NODE_MODULE(sword_addon, Init)
