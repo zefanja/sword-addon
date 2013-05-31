@@ -13,6 +13,7 @@
             },
             'include_dirs': [
               '/usr/include/sword',
+              'include'
             ],
           }
         ],

@@ -16,6 +16,8 @@
 
 //#define BUILDING_NODE_EXTENSION
 #include <node.h>
+#include <cvv8/convert.hpp>
+
 #include <stdio.h>
 #include <string>
 #include <iostream>
@@ -44,6 +46,7 @@
 #include <ftptrans.h>
 #include <filemgr.h>
 
+namespace cv = cvv8;
 using namespace v8;
 using namespace sword;
 
@@ -60,7 +63,6 @@ void AsyncRefreshRemoteSource(uv_work_t* req);
 
 Handle<Value> GetRemoteModules(const Arguments& args);
 void AsyncGetRemoteModules(uv_work_t* req);
-
 
 std::string SwordListModules(SWMgr *otherMgr, bool onlyNewAndUpdates);
 
@@ -82,6 +84,7 @@ struct Baton {
     std::string result;
     std::string arg1;
     std::string arg2;
+    bool argBool;
 };
 
 std::string convertString(std::string s) {
@@ -113,8 +116,6 @@ StatusReporter *statusReporter = 0;
 SWBuf baseDir;
 SWBuf confPath;
 
-void usage(const char *progName = 0, const char *error = 0);
-
 class MyInstallMgr : public InstallMgr {
 public:
     MyInstallMgr(const char *privatePath = "./", StatusReporter *sr = 0) : InstallMgr(privatePath, sr) {}
@@ -127,21 +128,6 @@ virtual bool isUserDisclaimerConfirmed() const {
 
 class MyStatusReporter : public StatusReporter {
     int last;
-        virtual void statusUpdate(double dltotal, double dlnow) {
-            /*int p = 74 * (int)(dlnow / dltotal);
-            for (;last < p; ++last) {
-                if (!last) {
-                    SWBuf output;
-                    output.setFormatted("[ File Bytes: %ld", (long)dltotal);
-                    while (output.size() < 75) output += " ";
-                    output += "]";
-                    std::cout << output.c_str() << "\n ";
-                }
-                std::cout << "-";
-            }
-            std::cout.flush(); */
-        }
-
         virtual void preStatus(long totalBytes, long completedBytes, const char *message) {
             std::stringstream out;
 
@@ -182,7 +168,6 @@ void finish(int status) {
     }
 }
 
-
 void createBasicConfig(bool enableRemote, bool addCrossWire) {
     FileMgr::createParent(confPath.c_str());
     remove(confPath.c_str());
@@ -198,12 +183,6 @@ void createBasicConfig(bool enableRemote, bool addCrossWire) {
         config["Sources"]["FTPSource"] = is.getConfEnt();
     }
     config.Save();
-}
-
-void initConfig() {
-    initInstallMgr();
-    bool enable = true; //installMgr->isUserDisclaimerConfirmed();
-    createBasicConfig(enable, true);
 }
 
 /*
@@ -235,8 +214,6 @@ PDL_bool uninstallModule(PDL_JSParameters *parms) {
 
 std::string SwordSyncRemoteSources(Baton *baton) {
     std::string sources;
-    initInstallMgr();
-
     // be sure we have at least some config file already out there
     if (!FileMgr::existsFile(confPath.c_str())) {
         createBasicConfig(true, true);
@@ -255,7 +232,6 @@ std::string SwordSyncRemoteSources(Baton *baton) {
 }
 
 std::string SwordListRemoteSources() {
-    initInstallMgr();
     std::stringstream sources;
     sources << "[";
     for (InstallSourceMap::iterator it = installMgr->sources.begin(); it != installMgr->sources.end(); it++) {
@@ -272,30 +248,28 @@ std::string SwordListRemoteSources() {
     return sources.str();
 }
 
-std::string SwordRefreshRemoteSource(Baton *baton, const char *sourceName) {
+void SwordRefreshRemoteSource(Baton *baton, const char *sourceName) {
     std::stringstream out;
-    initInstallMgr();
     InstallSourceMap::iterator source = installMgr->sources.find(sourceName);
     if (source == installMgr->sources.end()) {
         baton->error_message = "Couldn't find remote source";
         baton->error = true;
     }
 
-    if (installMgr->refreshRemoteSource(source->second))
-        out << "Refreshed Remote Source";
-    else
+    if (!installMgr->refreshRemoteSource(source->second))
         baton->error_message =  "Error Refreshing Remote Source";
-
-    return out.str();
 }
 
-std::string SwordListRemoteModules(Baton *baton, const char* sourceName) {
+std::string SwordListRemoteModules(Baton *baton, const char* sourceName, bool refreshSource = true) {
     bool onlyNewAndUpdated = false;
-    initInstallMgr();
     InstallSourceMap::iterator source = installMgr->sources.find(sourceName);
     if (source == installMgr->sources.end()) {
         baton->error_message = "remoteListModules: Couldn't find remote source";
         baton->error = true;
+    }
+
+    if(refreshSource) {
+        SwordRefreshRemoteSource(baton, sourceName);
     }
 
     return SwordListModules(source->second->getMgr(), onlyNewAndUpdated);
@@ -303,7 +277,6 @@ std::string SwordListRemoteModules(Baton *baton, const char* sourceName) {
 
 
 std::string SwordListModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false) {
-    initInstallMgr();
     std::stringstream out;
     SWModule *module;
     if (!otherMgr) otherMgr = mgr;
@@ -323,12 +296,18 @@ std::string SwordListModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false
             if (it != mods.begin()) {
                 out << ", ";
             }
-            out << "{\"name\": \"" << module->Name() << "\", ";
-            if (module->getConfigEntry("Lang")) {
-                out << "\"lang\": \"" << module->getConfigEntry("Lang") << "\", ";
-            }
-            out << "\"datapath\": \"" << module->getConfigEntry("DataPath") << "\", ";
-            out << "\"description\": \"" << module->getConfigEntry("Description") << "\"}";
+            out << "{\"name\": \"" << module->Name() << "\"";
+            out << ", \"datapath\": \"" << module->getConfigEntry("DataPath") << "\"";
+            out << ", \"description\": \"" << module->getConfigEntry("Description") << "\"";
+            if (module->getConfigEntry("Lang")) out << ", \"lang\": \"" << module->getConfigEntry("Lang") << "\"";
+            if (module->getConfigEntry("Versification")) out << ", \"versification\": \"" << module->getConfigEntry("Versification") << "\"";
+            if (module->getConfigEntry("About")) out << ", \"about\": \"" << convertString(module->getConfigEntry("About")) << "\"";
+            if (module->getConfigEntry("Version")) out << ", \"version\": \"" << module->getConfigEntry("Version") << "\"";
+            if (module->getConfigEntry("InstallSize")) out << ", \"installSize\": \"" << module->getConfigEntry("InstallSize") << "\"";
+            if (module->getConfigEntry("Copyright")) out << ", \"copyright\": \"" << convertString(module->getConfigEntry("Copyright")) << "\"";
+            if (module->getConfigEntry("DistributionLicense")) out << ", \"distributionLicense\": \"" << module->getConfigEntry("DistributionLicense") << "\"";
+            if (module->getConfigEntry("Category")) out << ", \"category\": \"" << module->getConfigEntry("Category") << "\"";
+            out << "}";
         }
     }
     out << "]";
@@ -336,77 +315,8 @@ std::string SwordListModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false
     return out.str();
 }
 
-/*PDL_bool remoteListModules(PDL_JSParameters *parms) {
-//void remoteListModules(const char *sourceName, bool onlyNewAndUpdated = false) {
-    bool onlyNewAndUpdated = false;
-    const char* sourceName = PDL_GetJSParamString(parms, 0);
 
-    initInstallMgr();
-    InstallSourceMap::iterator source = installMgr->sources.find(sourceName);
-    if (source == installMgr->sources.end()) {
-        PDL_JSException(parms, "remoteListModules: Couldn't find remote source");
-        finish(-3);
-        return PDL_FALSE;
-    }
-    listModules(source->second->getMgr(), onlyNewAndUpdated);
-
-    return PDL_TRUE;
-}
-
-PDL_bool getModuleDetails (PDL_JSParameters *parms) {
-    //Get information about a module
-    const char* moduleName = PDL_GetJSParamString(parms, 0);
-    const char* sourceName = PDL_GetJSParamString(parms, 1);
-    std::stringstream mod;
-
-    initInstallMgr();
-    InstallSourceMap::iterator source = installMgr->sources.find(sourceName);
-    if (source == installMgr->sources.end()) {
-        PDL_JSException(parms, "remoteListModules: Couldn't find remote source");
-        finish(-3);
-        return PDL_FALSE;
-    }
-
-    SWMgr* confReader = source->second->getMgr();
-    SWModule *module = confReader->getModule(moduleName);
-    if (!module) {
-        PDL_JSException(parms, "getModuleDetails: Couldn't find Module");
-        return PDL_FALSE;
-    }
-
-    mod << "{";
-
-    mod << "\"name\": \"" << module->Name() << "\"";
-    mod << ", \"datapath\": \"" << module->getConfigEntry("DataPath") << "\"";
-    mod << ", \"description\": \"" << convertString(module->getConfigEntry("Description")) << "\"";
-    if (module->getConfigEntry("Lang")) mod << ", \"lang\": \"" << module->getConfigEntry("Lang") << "\"";
-    if (module->getConfigEntry("Versification")) mod << ", \"versification\": \"" << module->getConfigEntry("Versification") << "\"";
-    if (module->getConfigEntry("About")) mod << ", \"about\": \"" << convertString(module->getConfigEntry("About")) << "\"";
-    if (module->getConfigEntry("Version")) mod << ", \"version\": \"" << module->getConfigEntry("Version") << "\"";
-    if (module->getConfigEntry("InstallSize")) mod << ", \"installSize\": \"" << module->getConfigEntry("InstallSize") << "\"";
-    if (module->getConfigEntry("Copyright")) mod << ", \"copyright\": \"" << convertString(module->getConfigEntry("Copyright")) << "\"";
-    if (module->getConfigEntry("DistributionLicense")) mod << ", \"distributionLicense\": \"" << module->getConfigEntry("DistributionLicense") << "\"";
-    if (module->getConfigEntry("Category")) mod << ", \"category\": \"" << module->getConfigEntry("Category") << "\"";
-
-    mod << "}";
-
-    const std::string& tmp = mod.str();
-
-    //const char *params[1];
-    //params[0] = cstr;
-    //PDL_Err mjErr = PDL_CallJS("returnGetDetails", params, 1);
-    PDL_Err mjErr = PDL_JSReply(parms, tmp.c_str());
-    return PDL_TRUE;
-}
-
-
-void localDirListModules(const char *dir) {
-    std::cout << "Available Modules:\n\n";
-    SWMgr mgr(dir);
-    listModules(&mgr);
-}
-
-void *remoteInstallModule(void *foo) {
+/*void *remoteInstallModule(void *foo) {
 //void remoteInstallModule(const char *sourceName, const char *modName) {
     initInstallMgr();
     std::stringstream out;
@@ -453,62 +363,9 @@ PDL_bool callRemoteInstallModule(PDL_JSParameters *parms) {
 
     iret1 = pthread_create( &thread1, NULL, remoteInstallModule, (void *) foobar);
     return PDL_TRUE;
-}
-
-
-void localDirInstallModule(const char *dir, const char *modName) {
-    initInstallMgr();
-    SWMgr lmgr(dir);
-    SWModule *module;
-    ModMap::iterator it = lmgr.Modules.find(modName);
-    if (it == lmgr.Modules.end()) {
-        fprintf(stderr, "Module [%s] not available at path [%s]\n", modName, dir);
-        finish(-4);
-    }
-    module = it->second;
-    int error = installMgr->installModule(mgr, dir, module->Name());
-    if (error) {
-        std::cout << "\nError installing module: [" << module->Name() << "] (write permissions?)\n";
-    } else std::cout << "\nInstalled module: [" << module->Name() << "]\n";
 } */
 
-/*END INSTALL MANAGER STUFF */
-
-
-
-Handle<Value> getModules(const Arguments& args) {
-    HandleScope scope;
-
-    refreshManagers();
-
-    std::stringstream modules;
-    ModMap::iterator it;
-
-    modules << "[";
-
-    for (it = displayLibrary->Modules.begin(); it != displayLibrary->Modules.end(); it++) {
-        SWModule *module = (*it).second;
-        if (it != displayLibrary->Modules.begin()) {
-            modules << ", ";
-        }
-        modules << "{\"name\": \"" << module->Name() << "\", ";
-        modules << "\"modType\":\"" << module->Type() << "\", ";
-        if (module->getConfigEntry("Lang")) {
-            modules << "\"lang\": \"" << module->getConfigEntry("Lang") << "\", ";
-        }
-        modules << "\"dataPath\":\"" << module->getConfigEntry("DataPath") << "\", ";
-        modules << "\"descr\": \"" << convertString(module->Description()) << "\"}";
-    }
-    modules << "]";
-
-    Local<Function> cb = Local<Function>::Cast(args[0]);
-    const unsigned argc = 1;
-
-    Local<Value> argv[argc] = { Local<Value>::New(String::New(modules.str().c_str())) };
-    cb->Call(Context::GetCurrent()->Global(), argc, argv);
-
-    return scope.Close(Undefined());
-}
+//END INSTALL MANAGER STUFF
 
 Handle<Value> SyncRemoteSources(const Arguments& args) {
     HandleScope scope;
@@ -576,11 +433,38 @@ void AsyncGetRemoteSources(uv_work_t* req) {
 }
 
 Handle<Value> GetRemoteModules(const Arguments& args) {
+    //Get a list of all modules form a source.
+    //arg1 - Object like {sourceName: "foo", refresh: false}. Refresh will be true by default.
+    //arg2 - callback function
     HandleScope scope;
+    Baton* baton = new Baton();
+    bool Refresh = true;
 
-    if (!args[0]->IsString()) {
-        ThrowException(Exception::TypeError(String::New("First argument must be a string!")));
-        return scope.Close(Undefined());
+    if (args[0]->IsObject()) {
+        Handle<Object> opt = Handle<Object>::Cast(args[0]);
+        if (opt->Has(String::New("refresh"))) {
+            if ((opt->Get(String::New("refresh"))->IsBoolean())){
+                Handle<Value> _refresh = opt->Get(String::New("refresh"));
+                Refresh = cv::CastFromJS<bool>(_refresh);
+
+            } else {
+                return ThrowException(Exception::TypeError(
+                    String::New("refresh must be a bool")));
+            }
+        }
+        if (opt->Has(String::New("sourceName"))) {
+            if ((opt->Get(String::New("sourceName"))->IsString())){
+                Handle<Value> _sourceName = opt->Get(String::New("sourceName"));
+                baton->arg1 = cv::CastFromJS<std::string>(_sourceName);
+
+            } else {
+                return ThrowException(Exception::TypeError(
+                    String::New("refresh must be a string")));
+            }
+        }
+    } else {
+        return ThrowException(Exception::TypeError(
+            String::New("First argument must be an object like {sourceName: 'foo', refresh: true")));
     }
 
     if (!args[1]->IsFunction()) {
@@ -588,14 +472,10 @@ Handle<Value> GetRemoteModules(const Arguments& args) {
             String::New("Second argument must be a callback function")));
     }
 
-    v8::String::Utf8Value param1(args[0]->ToString());
-
     Local<Function> callback = Local<Function>::Cast(args[1]);
-
-    Baton* baton = new Baton();
     baton->error = false;
     baton->callback = Persistent<Function>::New(callback);
-    baton->arg1 = std::string(*param1);
+    baton->argBool = Refresh;
 
     uv_work_t *req = new uv_work_t();
     req->data = baton;
@@ -610,8 +490,9 @@ Handle<Value> GetRemoteModules(const Arguments& args) {
 void AsyncGetRemoteModules(uv_work_t* req) {
     Baton* baton = static_cast<Baton*>(req->data);
     const char* sourceName = baton->arg1.c_str();
+    bool refresh = baton->argBool;
 
-    baton->result = SwordListRemoteModules(baton, sourceName);
+    baton->result = SwordListRemoteModules(baton, sourceName, refresh);
 }
 
 Handle<Value> RefreshRemoteSource(const Arguments& args) {
@@ -650,7 +531,7 @@ void AsyncRefreshRemoteSource(uv_work_t* req) {
     Baton* baton = static_cast<Baton*>(req->data);
     const char* sourceName = baton->arg1.c_str();
 
-    baton->result = SwordRefreshRemoteSource(baton, sourceName);
+    SwordRefreshRemoteSource(baton, sourceName);
 }
 
 void AfterAsyncWork(uv_work_t* req) {
@@ -684,8 +565,6 @@ void AfterAsyncWork(uv_work_t* req) {
 }
 
 void Init(Handle<Object> exports, Handle<Object> module) {
-    exports->Set(String::NewSymbol("getModules"),
-        FunctionTemplate::New(getModules)->GetFunction());
     exports->Set(String::NewSymbol("syncRemoteSources"),
         FunctionTemplate::New(SyncRemoteSources)->GetFunction());
     exports->Set(String::NewSymbol("getRemoteSources"),
@@ -694,6 +573,10 @@ void Init(Handle<Object> exports, Handle<Object> module) {
         FunctionTemplate::New(RefreshRemoteSource)->GetFunction());
     exports->Set(String::NewSymbol("getRemoteModules"),
         FunctionTemplate::New(GetRemoteModules)->GetFunction());
+
+    //Init InstallManager and a ModuleManager
+    initInstallMgr();
+    refreshManagers();
 }
 
 NODE_MODULE(sword_addon, Init)
