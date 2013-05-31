@@ -50,11 +50,19 @@ using namespace sword;
 // Forward declaration. Usually, you do this in a header file.
 Handle<Value> SyncRemoteSources(const Arguments& args);
 void AsyncSyncRemoteSources(uv_work_t* req);
-void AfterSyncRemoteSources(uv_work_t* req);
+void AfterAsyncWork(uv_work_t* req);
 
 Handle<Value> GetRemoteSources(const Arguments& args);
 void AsyncGetRemoteSources(uv_work_t* req);
-void AfterGetRemoteSources(uv_work_t* req);
+
+Handle<Value> RefreshRemoteSource(const Arguments& args);
+void AsyncRefreshRemoteSource(uv_work_t* req);
+
+Handle<Value> GetRemoteModules(const Arguments& args);
+void AsyncGetRemoteModules(uv_work_t* req);
+
+
+std::string SwordListModules(SWMgr *otherMgr, bool onlyNewAndUpdates);
 
 SWMgr *displayLibrary = 0;
 SWMgr *searchLibrary = 0;
@@ -72,6 +80,8 @@ struct Baton {
     bool error;
     std::string error_message;
     std::string result;
+    std::string arg1;
+    std::string arg2;
 };
 
 std::string convertString(std::string s) {
@@ -221,10 +231,30 @@ PDL_bool uninstallModule(PDL_JSParameters *parms) {
 
     PDL_Err mjErr = PDL_JSReply(parms, tmp.c_str());
     return PDL_TRUE;
+} */
+
+std::string SwordSyncRemoteSources(Baton *baton) {
+    std::string sources;
+    initInstallMgr();
+
+    // be sure we have at least some config file already out there
+    if (!FileMgr::existsFile(confPath.c_str())) {
+        createBasicConfig(true, true);
+        finish(1); // cleanup and don't exit
+        initInstallMgr();    // re-initInstallMgr with InstallMgr which uses our new config
+    }
+
+    if (!installMgr->refreshRemoteSourceConfiguration())
+        sources = "{\"message\": \"successfully synced remote source configuration.\"}";
+    else {
+        baton->error_message = "Could not sync remote source configuration. Check your Internet connection!";
+        baton->error = true;
+    }
+
+    return sources;
 }
 
-
-PDL_bool listRemoteSources(PDL_JSParameters *parms) {
+std::string SwordListRemoteSources() {
     initInstallMgr();
     std::stringstream sources;
     sources << "[";
@@ -239,51 +269,40 @@ PDL_bool listRemoteSources(PDL_JSParameters *parms) {
     }
     sources << "]";
 
-    const std::string& tmp = sources.str();
-
-    //const char *params[1];
-    //params[0] = cstr;
-    //PDL_Err mjErr = PDL_CallJS("returnRemoteSources", params, 1);
-    PDL_Err mjErr = PDL_JSReply(parms, tmp.c_str());
-    return PDL_TRUE;
+    return sources.str();
 }
 
-void *refreshRemoteSource(void *foo) {
-//void refreshRemoteSource(const char *sourceName) {
+std::string SwordRefreshRemoteSource(Baton *baton, const char *sourceName) {
     std::stringstream out;
     initInstallMgr();
-    InstallSourceMap::iterator source = installMgr->sources.find(remoteSource.c_str());
+    InstallSourceMap::iterator source = installMgr->sources.find(sourceName);
     if (source == installMgr->sources.end()) {
-        out << "{\"returnValue\": false, \"message\": \"Couldn't find remote source: " << remoteSource << "\"}";
-        finish(-3);
+        baton->error_message = "Couldn't find remote source";
+        baton->error = true;
     }
 
-    if (!installMgr->refreshRemoteSource(source->second))
-        out << "{\"returnValue\": true, \"message\": \"Remote Source Refreshed\"}";
-    else    out << "{\"returnValue\": false, \"message\": \"Error Refreshing Remote Source\"}";
+    if (installMgr->refreshRemoteSource(source->second))
+        out << "Refreshed Remote Source";
+    else
+        baton->error_message =  "Error Refreshing Remote Source";
 
-    const std::string& tmp = out.str();
-    const char* cstr = tmp.c_str();
-
-    const char *params[1];
-    params[0] = cstr;
-    PDL_Err mjErr = PDL_CallJS("returnRefreshRemoteSource", params, 1);
+    return out.str();
 }
 
-PDL_bool callRefreshRemoteSource(PDL_JSParameters *parms) {
-    const char* sourceName = PDL_GetJSParamString(parms, 0);
-    pthread_t thread1;
-    int  iret1;
+std::string SwordListRemoteModules(Baton *baton, const char* sourceName) {
+    bool onlyNewAndUpdated = false;
+    initInstallMgr();
+    InstallSourceMap::iterator source = installMgr->sources.find(sourceName);
+    if (source == installMgr->sources.end()) {
+        baton->error_message = "remoteListModules: Couldn't find remote source";
+        baton->error = true;
+    }
 
-    char *foobar;
-    remoteSource = sourceName;
-
-    iret1 = pthread_create( &thread1, NULL, refreshRemoteSource, (void *) foobar);
-    return PDL_TRUE;
+    return SwordListModules(source->second->getMgr(), onlyNewAndUpdated);
 }
 
 
-void listModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false) {
+std::string SwordListModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false) {
     initInstallMgr();
     std::stringstream out;
     SWModule *module;
@@ -301,7 +320,6 @@ void listModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false) {
         if (it->second & InstallMgr::MODSTAT_UPDATED) status = "+";
 
         if (!onlyNewAndUpdates || status == "*" || status == "+") {
-            //std::cout << status << "[" << module->Name() << "]  \t(" << version << ")  \t- " << module->Description() << "\n";
             if (it != mods.begin()) {
                 out << ", ";
             }
@@ -315,15 +333,10 @@ void listModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false) {
     }
     out << "]";
 
-    const std::string& tmp = out.str();
-    const char* cstr = tmp.c_str();
-
-    const char *params[1];
-    params[0] = cstr;
-    PDL_Err mjErr = PDL_CallJS("returnListModules", params, 1);
+    return out.str();
 }
 
-PDL_bool remoteListModules(PDL_JSParameters *parms) {
+/*PDL_bool remoteListModules(PDL_JSParameters *parms) {
 //void remoteListModules(const char *sourceName, bool onlyNewAndUpdated = false) {
     bool onlyNewAndUpdated = false;
     const char* sourceName = PDL_GetJSParamString(parms, 0);
@@ -522,7 +535,7 @@ Handle<Value> SyncRemoteSources(const Arguments& args) {
     // that should be executed in the threadpool and back in the main thread
     // after the threadpool function completed.
     int status = uv_queue_work(uv_default_loop(), req, AsyncSyncRemoteSources,
-                               (uv_after_work_cb)AfterSyncRemoteSources);
+                               (uv_after_work_cb)AfterAsyncWork);
     assert(status == 0);
 
     return Undefined();
@@ -530,54 +543,7 @@ Handle<Value> SyncRemoteSources(const Arguments& args) {
 
 void AsyncSyncRemoteSources(uv_work_t* req) {
     Baton* baton = static_cast<Baton*>(req->data);
-
-    std::string sources;
-    initInstallMgr();
-
-    // be sure we have at least some config file already out there
-    if (!FileMgr::existsFile(confPath.c_str())) {
-        createBasicConfig(true, true);
-        finish(1); // cleanup and don't exit
-        initInstallMgr();    // re-initInstallMgr with InstallMgr which uses our new config
-    }
-
-    if (!installMgr->refreshRemoteSourceConfiguration())
-        sources = "{\"message\": \"successfully sync remote source configuration.\"}";
-    else {
-        baton->error_message = "Could not sync remote source configuration. Check your Internet connection!";
-        baton->error = true;
-    }
-    baton->result = sources;
-}
-
-void AfterSyncRemoteSources(uv_work_t* req) {
-    HandleScope scope;
-    Baton* baton = static_cast<Baton*>(req->data);
-
-    if (baton->error) {
-        Local<Value> err = Exception::Error(String::New(baton->error_message.c_str()));
-        const unsigned argc = 1;
-        Local<Value> argv[argc] = { err };
-        TryCatch try_catch;
-        baton->callback->Call(Context::GetCurrent()->Global(), argc, argv);
-        if (try_catch.HasCaught()) {
-            node::FatalException(try_catch);
-        }
-    } else {
-        const unsigned argc = 2;
-        Local<Value> argv[argc] = {
-            Local<Value>::New(Null()),
-            Local<Value>::New(String::New(baton->result.c_str()))
-        };
-        TryCatch try_catch;
-        baton->callback->Call(Context::GetCurrent()->Global(), argc, argv);
-        if (try_catch.HasCaught()) {
-            node::FatalException(try_catch);
-        }
-    }
-    baton->callback.Dispose();
-    delete baton;
-    delete req;
+    baton->result = SwordSyncRemoteSources(baton);
 }
 
 Handle<Value> GetRemoteSources(const Arguments& args) {
@@ -598,7 +564,7 @@ Handle<Value> GetRemoteSources(const Arguments& args) {
     req->data = baton;
 
     int status = uv_queue_work(uv_default_loop(), req, AsyncGetRemoteSources,
-                               (uv_after_work_cb)AfterGetRemoteSources);
+                               (uv_after_work_cb)AfterAsyncWork);
     assert(status == 0);
 
     return Undefined();
@@ -606,26 +572,88 @@ Handle<Value> GetRemoteSources(const Arguments& args) {
 
 void AsyncGetRemoteSources(uv_work_t* req) {
     Baton* baton = static_cast<Baton*>(req->data);
-
-    initInstallMgr();
-    std::stringstream sources;
-    sources << "[";
-    for (InstallSourceMap::iterator it = installMgr->sources.begin(); it != installMgr->sources.end(); it++) {
-        if (it != installMgr->sources.begin()) {
-            sources << ", ";
-        }
-        sources << "{\"name\": \"" << it->second->caption << "\", ";
-        sources << "\"type\": \"" << it->second->type << "\", ";
-        sources << "\"source\": \"" << it->second->source << "\", ";
-        sources << "\"directory\": \"" << it->second->directory << "\"}";
-    }
-    sources << "]";
-
-    baton->result = sources.str();
-
+    baton->result = SwordListRemoteSources();
 }
 
-void AfterGetRemoteSources(uv_work_t* req) {
+Handle<Value> GetRemoteModules(const Arguments& args) {
+    HandleScope scope;
+
+    if (!args[0]->IsString()) {
+        ThrowException(Exception::TypeError(String::New("First argument must be a string!")));
+        return scope.Close(Undefined());
+    }
+
+    if (!args[1]->IsFunction()) {
+        return ThrowException(Exception::TypeError(
+            String::New("Second argument must be a callback function")));
+    }
+
+    v8::String::Utf8Value param1(args[0]->ToString());
+
+    Local<Function> callback = Local<Function>::Cast(args[1]);
+
+    Baton* baton = new Baton();
+    baton->error = false;
+    baton->callback = Persistent<Function>::New(callback);
+    baton->arg1 = std::string(*param1);
+
+    uv_work_t *req = new uv_work_t();
+    req->data = baton;
+
+    int status = uv_queue_work(uv_default_loop(), req, AsyncGetRemoteModules,
+                               (uv_after_work_cb)AfterAsyncWork);
+    assert(status == 0);
+
+    return Undefined();
+}
+
+void AsyncGetRemoteModules(uv_work_t* req) {
+    Baton* baton = static_cast<Baton*>(req->data);
+    const char* sourceName = baton->arg1.c_str();
+
+    baton->result = SwordListRemoteModules(baton, sourceName);
+}
+
+Handle<Value> RefreshRemoteSource(const Arguments& args) {
+    HandleScope scope;
+
+    if (!args[0]->IsString()) {
+        ThrowException(Exception::TypeError(String::New("First argument must be a string!")));
+        return scope.Close(Undefined());
+    }
+
+    if (!args[1]->IsFunction()) {
+        return ThrowException(Exception::TypeError(
+            String::New("Second argument must be a callback function")));
+    }
+
+    v8::String::Utf8Value param1(args[0]->ToString());
+
+    Local<Function> callback = Local<Function>::Cast(args[1]);
+
+    Baton* baton = new Baton();
+    baton->error = false;
+    baton->callback = Persistent<Function>::New(callback);
+    baton->arg1 = std::string(*param1);
+
+    uv_work_t *req = new uv_work_t();
+    req->data = baton;
+
+    int status = uv_queue_work(uv_default_loop(), req, AsyncRefreshRemoteSource,
+                               (uv_after_work_cb)AfterAsyncWork);
+    assert(status == 0);
+
+    return Undefined();
+}
+
+void AsyncRefreshRemoteSource(uv_work_t* req) {
+    Baton* baton = static_cast<Baton*>(req->data);
+    const char* sourceName = baton->arg1.c_str();
+
+    baton->result = SwordRefreshRemoteSource(baton, sourceName);
+}
+
+void AfterAsyncWork(uv_work_t* req) {
     HandleScope scope;
     Baton* baton = static_cast<Baton*>(req->data);
 
@@ -656,16 +684,16 @@ void AfterGetRemoteSources(uv_work_t* req) {
 }
 
 void Init(Handle<Object> exports, Handle<Object> module) {
-    //getModules
     exports->Set(String::NewSymbol("getModules"),
         FunctionTemplate::New(getModules)->GetFunction());
     exports->Set(String::NewSymbol("syncRemoteSources"),
         FunctionTemplate::New(SyncRemoteSources)->GetFunction());
     exports->Set(String::NewSymbol("getRemoteSources"),
         FunctionTemplate::New(GetRemoteSources)->GetFunction());
-    //getBooknames
-    /*exports->Set(String::NewSymbol("getBooknames"),
-        FunctionTemplate::New(getBooknames)->GetFunction());*/
+    exports->Set(String::NewSymbol("refreshRemoteSource"),
+        FunctionTemplate::New(RefreshRemoteSource)->GetFunction());
+    exports->Set(String::NewSymbol("getRemoteModules"),
+        FunctionTemplate::New(GetRemoteModules)->GetFunction());
 }
 
 NODE_MODULE(sword_addon, Init)
