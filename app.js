@@ -1,16 +1,16 @@
 var sword = require('./build/Release/sword-addon');
 
-/*sword.getModules(function(inModules){
-    console.log(inModules);
-}); */
-
-/*sword.syncRemoteSources(function(inError, inValue){
-    console.log(inError, inValue);
-});*/
-
-sword.getRemoteSources(function (inError, inSources) {
-    console.log(inError, inSources);
-    sword.getRemoteModules({sourceName: JSON.parse(inSources)[3].name, refresh: true}, function (inError, inModules) {
-        console.log(inError, JSON.parse(inModules));
-    });
+sword.syncRemoteSources(function(inError){
+    //inError is null if there is no error.
+    if(inError === null)
+        //get a list of the remote Sources / Repositories
+        sword.getRemoteSources(function (inError, inSources) {
+            //inSources is a JSON Object with a list of all repositories
+            //get a list of all modules in a remote source (as JSON)
+            sword.getRemoteModules({sourceName: JSON.parse(inSources)[0].name, refresh: true}, function (inError, inModules) {
+                //[{name: "foo", lang: "en", about: "...", ...}, {...}]
+                console.log(inModules);
+            });
+        });
 });
+
