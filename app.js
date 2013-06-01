@@ -5,7 +5,7 @@ sword.syncRemoteSources(function(inError){
     if(inError === null)
         //get a list of the remote Sources / Repositories
         sword.getRemoteSources(function (inError, inSources) {
-            //inSources is a JSON Object with a list of all repositories
+            //inSources is a JSON String with a list of all repositories
             //get a list of all modules in a remote source (as JSON)
             sword.getRemoteModules({sourceName: JSON.parse(inSources)[0].name, refresh: true}, function (inError, inModules) {
                 //[{name: "foo", lang: "en", about: "...", ...}, {...}]
@@ -14,3 +14,7 @@ sword.syncRemoteSources(function(inError){
         });
 });
 
+//get local installed modules
+sword.getModules(function (inError, inModules) {
+    console.log(inModules);
+});

@@ -64,6 +64,9 @@ void AsyncRefreshRemoteSource(uv_work_t* req);
 Handle<Value> GetRemoteModules(const Arguments& args);
 void AsyncGetRemoteModules(uv_work_t* req);
 
+Handle<Value> GetModules(const Arguments& args);
+void AsyncGetModules(uv_work_t* req);
+
 std::string SwordListModules(SWMgr *otherMgr, bool onlyNewAndUpdates);
 
 SWMgr *displayLibrary = 0;
@@ -80,12 +83,16 @@ int searchType = -2;
 struct Baton {
     Persistent<Function> callback;
     bool error;
+    bool asyncSend;
     std::string error_message;
     std::string result;
     std::string arg1;
     std::string arg2;
     bool argBool;
 };
+
+uv_loop_t *loop;
+uv_async_t async;
 
 std::string convertString(std::string s) {
     std::stringstream ss;
@@ -495,6 +502,41 @@ void AsyncGetRemoteModules(uv_work_t* req) {
     baton->result = SwordListRemoteModules(baton, sourceName, refresh);
 }
 
+Handle<Value> GetModules(const Arguments& args) {
+    //Get a list of all modules
+    HandleScope scope;
+    Baton* baton = new Baton();
+
+    if (!args[0]->IsFunction()) {
+        return ThrowException(Exception::TypeError(
+            String::New("First argument must be a callback function")));
+    }
+
+    Local<Function> callback = Local<Function>::Cast(args[0]);
+    baton->error = false;
+    baton->callback = Persistent<Function>::New(callback);
+
+    uv_work_t *req = new uv_work_t();
+    req->data = baton;
+
+    /*loop = uv_default_loop();
+    uv_async_init(loop, &async, print_progress);
+    baton->asyncSend = true; */
+
+    int status = uv_queue_work(uv_default_loop(), req, AsyncGetModules,
+                               (uv_after_work_cb)AfterAsyncWork);
+    assert(status == 0);
+
+    return Undefined();
+}
+
+
+
+void AsyncGetModules(uv_work_t* req) {
+    Baton* baton = static_cast<Baton*>(req->data);
+    baton->result = SwordListModules();
+}
+
 Handle<Value> RefreshRemoteSource(const Arguments& args) {
     HandleScope scope;
 
@@ -560,6 +602,8 @@ void AfterAsyncWork(uv_work_t* req) {
         }
     }
     baton->callback.Dispose();
+    if (baton->asyncSend)
+        uv_close((uv_handle_t*) &async, NULL);
     delete baton;
     delete req;
 }
@@ -573,6 +617,8 @@ void Init(Handle<Object> exports, Handle<Object> module) {
         FunctionTemplate::New(RefreshRemoteSource)->GetFunction());
     exports->Set(String::NewSymbol("getRemoteModules"),
         FunctionTemplate::New(GetRemoteModules)->GetFunction());
+    exports->Set(String::NewSymbol("getModules"),
+        FunctionTemplate::New(GetModules)->GetFunction());
 
     //Init InstallManager and a ModuleManager
     initInstallMgr();
