@@ -70,6 +70,9 @@ void AsyncGetModules(uv_work_t* req);
 Handle<Value> InstallModule(const Arguments& args);
 void AsyncInstallModule(uv_work_t* req);
 
+Handle<Value> GetRawText(const Arguments& args);
+void AsyncGetRawText(uv_work_t* req);
+
 std::string SwordListModules(SWMgr *otherMgr, bool onlyNewAndUpdates);
 
 SWMgr *displayLibrary = 0;
@@ -112,10 +115,12 @@ std::string convertString(std::string s) {
 void refreshManagers() {
     delete displayLibrary;
     delete searchLibrary;
-    displayLibrary = new SWMgr(new MarkupFilterMgr(FMT_HTMLHREF));
+    displayLibrary = new SWMgr(new MarkupFilterMgr(FMT_HTML));
     searchLibrary = new SWMgr();
     displayLibrary->setGlobalOption("Footnotes","On");
     displayLibrary->setGlobalOption("Headings", "On");
+    displayLibrary->setGlobalOption("Strong's Numbers", "On");
+    displayLibrary->setGlobalOption("Words of Christ in Red", "On");
 }
 
 /*INSTALL MANAGER STUFF */
@@ -158,7 +163,6 @@ void initInstallMgr() {
             std::cout << "ERROR: SWORD configuration not found.  Please configure SWORD before using this program.";
             return;
         }
-        std::cout << mgr->configPath;
         SWBuf baseDir = mgr->getHomeDir();
         if (baseDir.length() < 1) baseDir = ".";
         baseDir += "/.sword/InstallMgr";
@@ -357,6 +361,76 @@ void SwordRemoteInstallModule(Baton *baton, const char* sourceName, const char* 
 }
 
 //END INSTALL MANAGER STUFF
+
+std::string SwordGetRawText(Baton *baton, const char* moduleName, const char* key) {
+    /*Get verses from a specific module (e.g. "ESV"). Set your biblepassage in key e.g. "James 1:19" */
+    std::stringstream passage;
+    std::stringstream tmpPassage;
+    std::stringstream out;
+
+    SWModule *module = displayLibrary->getModule(moduleName);
+
+    VerseKey *vk = (VerseKey*)module->getKey();
+    vk->Headings(true);
+    ListKey verses = VerseKey().ParseVerseList(key, "", true);
+
+    AttributeTypeList::iterator i1;
+    AttributeList::iterator i2;
+    AttributeValue::iterator i3;
+
+    out << "[";
+
+    for (verses = TOP; !verses.Error(); verses++) {
+        vk->setText(verses);
+
+        if (strcmp(module->RenderText(), "") != 0) {
+            //headingOn = 0;
+            out << "{\"content\": \"" << convertString(module->RenderText()) << "\", ";
+            out << "\"vnumber\": \"" << vk->Verse() << "\", ";
+            out << "\"cnumber\": \"" << vk->Chapter() << "\"";
+            if (strcmp(module->getEntryAttributes()["Heading"]["Preverse"]["0"].c_str(), "") != 0)
+                out << ", \"heading\": \"" << module->getEntryAttributes()["Heading"]["Preverse"]["0"].c_str() << "\"";
+
+            for (i1 = module->getEntryAttributes().begin(); i1 != module->getEntryAttributes().end(); i1++) {
+                if (strcmp(i1->first, "Footnote") == 0) {
+                    out << ", \"footnotes\": [";
+                    for (i2 = i1->second.begin(); i2 != i1->second.end(); i2++) {
+                        out << "{";
+                        for (i3 = i2->second.begin(); i3 != i2->second.end(); i3++) {
+                            out << "\"" << i3->first << "\": \"" << convertString(i3->second.c_str()) << "\"";
+                            //footnotesOn = 1;
+                            if (i3 != --i2->second.end()) {
+                                out << ", ";
+                            }
+                        }
+                        out << "}";
+                        if (i2 != --i1->second.end()) {
+                            out << ", ";
+                        }
+                    }
+                    out << "]";
+                }
+            }
+
+            if (vk->Chapter() == 1 && vk->Verse() == 1) {
+                vk->setChapter(0);
+                vk->setVerse(0);
+                out << ", \"intro\": \"" << convertString(module->RenderText()) << "\"";
+            }
+
+            out << "}";
+
+            ListKey helper = verses;
+            helper++;
+            if (!helper.Error()) {
+                out << ", ";
+            }
+        }
+    }
+
+    out << "]";
+    return out.str();
+}
 
 //BEGIN NODE WRAPPER STUFF
 
@@ -628,6 +702,62 @@ void AsyncInstallModule(uv_work_t* req) {
     SwordRemoteInstallModule(baton, baton->arg2.c_str(), baton->arg1.c_str());
 }
 
+Handle<Value> GetRawText(const Arguments& args) {
+    //Get raw text entry specified by a vkey
+    HandleScope scope;
+    Baton* baton = new Baton();
+
+    if (args[0]->IsObject()) {
+        Handle<Object> opt = Handle<Object>::Cast(args[0]);
+        if (opt->Has(String::New("moduleName"))) {
+            if ((opt->Get(String::New("moduleName"))->IsString())){
+                Handle<Value> _moduleName = opt->Get(String::New("moduleName"));
+                baton->arg1 = cv::CastFromJS<std::string>(_moduleName);
+
+            } else {
+                return ThrowException(Exception::TypeError(
+                    String::New("moduleName must be a string")));
+            }
+        }
+        if (opt->Has(String::New("key"))) {
+            if ((opt->Get(String::New("key"))->IsString())){
+                Handle<Value> _key = opt->Get(String::New("key"));
+                baton->arg2 = cv::CastFromJS<std::string>(_key);
+
+            } else {
+                return ThrowException(Exception::TypeError(
+                    String::New("key must be a string")));
+            }
+        }
+    } else {
+        return ThrowException(Exception::TypeError(
+            String::New("First argument must be an object like {key: 'foo', moduleName: 'bar'")));
+    }
+
+    if (!args[1]->IsFunction()) {
+        return ThrowException(Exception::TypeError(
+            String::New("Second argument must be a callback function")));
+    }
+
+    Local<Function> callback = Local<Function>::Cast(args[1]);
+    baton->error = false;
+    baton->callback = Persistent<Function>::New(callback);
+
+    uv_work_t *req = new uv_work_t();
+    req->data = baton;
+
+    int status = uv_queue_work(uv_default_loop(), req, AsyncGetRawText,
+                               (uv_after_work_cb)AfterAsyncWork);
+    assert(status == 0);
+
+    return Undefined();
+}
+
+void AsyncGetRawText(uv_work_t* req) {
+    Baton* baton = static_cast<Baton*>(req->data);
+    baton->result = SwordGetRawText(baton, baton->arg1.c_str(), baton->arg2.c_str());
+}
+
 void AfterAsyncWork(uv_work_t* req) {
     HandleScope scope;
     Baton* baton = static_cast<Baton*>(req->data);
@@ -673,8 +803,8 @@ void Init(Handle<Object> exports, Handle<Object> module) {
         FunctionTemplate::New(GetModules)->GetFunction());
     exports->Set(String::NewSymbol("installModule"),
         FunctionTemplate::New(InstallModule)->GetFunction());
-    //exports->Set(String::NewSymbol("getRawText"),
-        //FunctionTemplate::New(GetRawText)->GetFunction());
+    exports->Set(String::NewSymbol("getRawText"),
+        FunctionTemplate::New(GetRawText)->GetFunction());
 
     //Init InstallManager and a ModuleManager
     initInstallMgr();
