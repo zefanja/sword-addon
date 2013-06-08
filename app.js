@@ -1,6 +1,14 @@
-var sword = require('./build/Release/sword-addon');
+var path = require("path");
 
-sword.syncRemoteSources(function(inError){
+function getSwordPath() {
+    var home = process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE;
+    return path.join(home, ".sword");
+}
+process.env["SWORD_PATH"] = getSwordPath();
+
+var sword = require("./build/Release/sword-addon");
+
+/*sword.syncRemoteSources(function(inError){
     //inError is null if there is no error.
     if(inError === null)
         //get a list of the remote Sources / Repositories
@@ -12,9 +20,14 @@ sword.syncRemoteSources(function(inError){
                 console.log(inModules);
             });
         });
-});
+}); */
 
 //get local installed modules
-sword.getModules(function (inError, inModules) {
-    console.log(inModules);
+/*sword.getModules(function (inError, inModules) {
+    console.log(JSON.parse(inModules));
+});*/
+sword.getRemoteModules({sourceName: "CrossWire", refresh: true}, function (inError, inModules) {
+    console.log(JSON.parse(inModules));
+    //sword.installModule({moduleName: "NETnotesfree", sourceName: "Bible.org"}, function (inError) {console.log("installModule", inError);});
 });
+

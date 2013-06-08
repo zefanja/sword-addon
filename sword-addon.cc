@@ -67,6 +67,9 @@ void AsyncGetRemoteModules(uv_work_t* req);
 Handle<Value> GetModules(const Arguments& args);
 void AsyncGetModules(uv_work_t* req);
 
+Handle<Value> InstallModule(const Arguments& args);
+void AsyncInstallModule(uv_work_t* req);
+
 std::string SwordListModules(SWMgr *otherMgr, bool onlyNewAndUpdates);
 
 SWMgr *displayLibrary = 0;
@@ -137,23 +140,28 @@ class MyStatusReporter : public StatusReporter {
     int last;
         virtual void preStatus(long totalBytes, long completedBytes, const char *message) {
             std::stringstream out;
-
             out << "{\"total\": \"" << totalBytes << "\", \"completed\": \"" << completedBytes << "\"}";
+            //async.data = out.str();
+            //uv_async_send(&async);
+            std::cout << out.str() << std::endl;
+
             //TODO: Need a callback here do report the status.
         }
 };
 
 void initInstallMgr() {
+    //putenv("SWORD_PATH=/home/zefanja/.sword");
     if (!mgr) {
         mgr = new SWMgr();
 
-        if (!mgr->config)
+        if (!mgr->config) {
             std::cout << "ERROR: SWORD configuration not found.  Please configure SWORD before using this program.";
-
-        SWBuf baseDir = ""; //TODO: Do we need to set a path here or just take the current path? Best would be $HOME.
+            return;
+        }
+        std::cout << mgr->configPath;
+        SWBuf baseDir = mgr->getHomeDir();
         if (baseDir.length() < 1) baseDir = ".";
         baseDir += "/.sword/InstallMgr";
-        //PDL_Log("HELLO " + baseDir.c_str());
         confPath = baseDir + "/InstallMgr.conf";
         statusReporter = new MyStatusReporter();
         installMgr = new MyInstallMgr(baseDir, statusReporter);
@@ -168,11 +176,6 @@ void finish(int status) {
 
     installMgr = 0;
     mgr        = 0;
-
-    if (status < 1) {
-        std::cout << "\n";
-        exit(status);
-    }
 }
 
 void createBasicConfig(bool enableRemote, bool addCrossWire) {
@@ -323,56 +326,39 @@ std::string SwordListModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false
 }
 
 
-/*void *remoteInstallModule(void *foo) {
-//void remoteInstallModule(const char *sourceName, const char *modName) {
+void SwordRemoteInstallModule(Baton *baton, const char* sourceName, const char* modName) {
     initInstallMgr();
-    std::stringstream out;
-    InstallSourceMap::iterator source = installMgr->sources.find(remoteSource.c_str());
+    InstallSourceMap::iterator source = installMgr->sources.find(sourceName);
     if (source == installMgr->sources.end()) {
-        out << "{\"returnValue\": false, \"message\": \"Couldn't find remote source: " << remoteSource << "\"}";
-        finish(-3);
+        baton->error_message = "Couldn't find remote source";
+        baton->error = true;
+        return;
     }
     InstallSource *is = source->second;
     SWMgr *rmgr = is->getMgr();
     SWModule *module;
-    ModMap::iterator it = rmgr->Modules.find(modName.c_str());
+    ModMap::iterator it = rmgr->Modules.find(modName);
     if (it == rmgr->Modules.end()) {
-        out << "{\"returnValue\": false, \"message\": \"Remote source " << remoteSource << " does not make available module " << modName << "\"}";
-        finish(-4);
+        baton->error_message = "Remote source does not have this module";
+        baton->error = true;
+        return;
     }
     module = it->second;
 
     int error = installMgr->installModule(mgr, 0, module->Name(), is);
     if (error) {
-        out << "{\"returnValue\": false, \"message\": \"Error installing module: " << modName << ". (internet connection?)\"}";
-    } else out << "{\"returnValue\": true, \"message\": \"Installed module: " << modName << "\"}";
+        baton->error_message = "Error installing module. (internet connection?)";
+        baton->error = true;
+        return;
+    }
 
     //Refresh Mgr
     refreshManagers();
-
-    const std::string& tmp = out.str();
-    const char* cstr = tmp.c_str();
-
-    const char *params[1];
-    params[0] = cstr;
-    PDL_Err mjErr = PDL_CallJS("returnUnzip", params, 1);
 }
 
-PDL_bool callRemoteInstallModule(PDL_JSParameters *parms) {
-    const char* sourceName = PDL_GetJSParamString(parms, 0);
-    const char* moduleName = PDL_GetJSParamString(parms, 1);
-    pthread_t thread1;
-    int  iret1;
-
-    char *foobar;
-    remoteSource = sourceName;
-    modName = moduleName;
-
-    iret1 = pthread_create( &thread1, NULL, remoteInstallModule, (void *) foobar);
-    return PDL_TRUE;
-} */
-
 //END INSTALL MANAGER STUFF
+
+//BEGIN NODE WRAPPER STUFF
 
 Handle<Value> SyncRemoteSources(const Arguments& args) {
     HandleScope scope;
@@ -458,6 +444,9 @@ Handle<Value> GetRemoteModules(const Arguments& args) {
                 return ThrowException(Exception::TypeError(
                     String::New("refresh must be a bool")));
             }
+        } else {
+            return ThrowException(Exception::TypeError(
+                String::New("refresh is not defined")));
         }
         if (opt->Has(String::New("sourceName"))) {
             if ((opt->Get(String::New("sourceName"))->IsString())){
@@ -466,8 +455,11 @@ Handle<Value> GetRemoteModules(const Arguments& args) {
 
             } else {
                 return ThrowException(Exception::TypeError(
-                    String::New("refresh must be a string")));
+                    String::New("sourceName must be a string")));
             }
+        } else {
+            return ThrowException(Exception::TypeError(
+                String::New("sourceName is not defined")));
         }
     } else {
         return ThrowException(Exception::TypeError(
@@ -576,6 +568,66 @@ void AsyncRefreshRemoteSource(uv_work_t* req) {
     SwordRefreshRemoteSource(baton, sourceName);
 }
 
+Handle<Value> InstallModule(const Arguments& args) {
+    //install a module
+    HandleScope scope;
+    Baton* baton = new Baton();
+
+    if (args[0]->IsObject()) {
+        Handle<Object> opt = Handle<Object>::Cast(args[0]);
+        if (opt->Has(String::New("moduleName"))) {
+            if ((opt->Get(String::New("moduleName"))->IsString())){
+                Handle<Value> _moduleName = opt->Get(String::New("moduleName"));
+                baton->arg1 = cv::CastFromJS<std::string>(_moduleName);
+
+            } else {
+                return ThrowException(Exception::TypeError(
+                    String::New("moduleName must be a string")));
+            }
+        }
+        if (opt->Has(String::New("sourceName"))) {
+            if ((opt->Get(String::New("sourceName"))->IsString())){
+                Handle<Value> _sourceName = opt->Get(String::New("sourceName"));
+                baton->arg2 = cv::CastFromJS<std::string>(_sourceName);
+
+            } else {
+                return ThrowException(Exception::TypeError(
+                    String::New("sourceName must be a string")));
+            }
+        }
+    } else {
+        return ThrowException(Exception::TypeError(
+            String::New("First argument must be an object like {sourceName: 'foo', moduleName: 'bar'")));
+    }
+
+    if (!args[1]->IsFunction()) {
+        return ThrowException(Exception::TypeError(
+            String::New("Second argument must be a callback function")));
+    }
+
+    Local<Function> callback = Local<Function>::Cast(args[1]);
+    baton->error = false;
+    baton->callback = Persistent<Function>::New(callback);
+
+    uv_work_t *req = new uv_work_t();
+    req->data = baton;
+
+    loop = uv_default_loop();
+    //uv_async_init(loop, &async, print_progress);
+    //baton->asyncSend = true;
+
+    int status = uv_queue_work(loop, req, AsyncInstallModule,
+                               (uv_after_work_cb)AfterAsyncWork);
+    assert(status == 0);
+
+    return Undefined();
+}
+
+void AsyncInstallModule(uv_work_t* req) {
+    Baton* baton = static_cast<Baton*>(req->data);
+    SwordRemoteInstallModule(baton, baton->arg2.c_str(), baton->arg1.c_str());
+}
+
 void AfterAsyncWork(uv_work_t* req) {
     HandleScope scope;
     Baton* baton = static_cast<Baton*>(req->data);
@@ -619,6 +671,10 @@ void Init(Handle<Object> exports, Handle<Object> module) {
         FunctionTemplate::New(GetRemoteModules)->GetFunction());
     exports->Set(String::NewSymbol("getModules"),
         FunctionTemplate::New(GetModules)->GetFunction());
+    exports->Set(String::NewSymbol("installModule"),
+        FunctionTemplate::New(InstallModule)->GetFunction());
+    //exports->Set(String::NewSymbol("getRawText"),
+        //FunctionTemplate::New(GetRawText)->GetFunction());
 
     //Init InstallManager and a ModuleManager
     initInstallMgr();
