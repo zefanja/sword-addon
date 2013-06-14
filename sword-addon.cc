@@ -70,6 +70,9 @@ void AsyncGetModules(uv_work_t* req);
 Handle<Value> InstallModule(const Arguments& args);
 void AsyncInstallModule(uv_work_t* req);
 
+Handle<Value> GetModuleBCV(const Arguments& args);
+void AsyncGetModuleBCV(uv_work_t* req);
+
 Handle<Value> GetRawText(const Arguments& args);
 void AsyncGetRawText(uv_work_t* req);
 
@@ -362,6 +365,53 @@ void SwordRemoteInstallModule(Baton *baton, const char* sourceName, const char* 
 
 //END INSTALL MANAGER STUFF
 
+std::string SwordGetModuleBCV(Baton *baton, const char* moduleName) {
+    std::stringstream bnames;
+
+    SWModule *module = displayLibrary->getModule(moduleName);
+    if(!module) {
+        baton->error = true;
+        baton->error_message = "Module does not exist";
+        return "";
+    }
+
+    VerseKey *vkey = (VerseKey*)module->getKey();
+    if(!vkey) {
+        baton->error = true;
+        baton->error_message = "Couldn't find vkey";
+        return "";
+    }
+
+    VerseKey &vk = *vkey;
+
+    bnames << "[";
+    for (int b = 0; b < 2; b++) {
+        vk.setTestament(b+1);
+        for (int i = 0; i < vk.BMAX[b]; i++) {
+            vk.setBook(i+1);
+            bnames << "{\"name\": \"" << convertString(vk.getBookName()) << "\", ";
+            bnames << "\"abbrev\": \"" << convertString(vk.getBookAbbrev()) << "\", ";
+            bnames << "\"vmax\": [";
+            for (int c = 0; c<vk.getChapterMax(); c++) {
+                vk.setChapter(c+1);
+                bnames << vk.getVerseMax();
+                if (c+1 < vk.getChapterMax()) {
+                    bnames << ", ";
+                }
+
+            }
+            bnames << "], \"cmax\":" << vk.getChapterMax() << "}";
+            if (i+1 == vk.BMAX[b] && b == 1) {
+                bnames << "]";
+            } else {
+                bnames << ", ";
+            }
+        }
+    }
+
+    return bnames.str();
+}
+
 std::string SwordGetRawText(Baton *baton, const char* moduleName, const char* key) {
     /*Get verses from a specific module (e.g. "ESV"). Set your biblepassage in key e.g. "James 1:19" */
     std::stringstream passage;
@@ -369,6 +419,11 @@ std::string SwordGetRawText(Baton *baton, const char* moduleName, const char* ke
     std::stringstream out;
 
     SWModule *module = displayLibrary->getModule(moduleName);
+    if(!module) {
+        baton->error = true;
+        baton->error_message = "Module does not exist";
+        return "";
+    }
 
     VerseKey *vk = (VerseKey*)module->getKey();
     vk->Headings(true);
@@ -385,9 +440,11 @@ std::string SwordGetRawText(Baton *baton, const char* moduleName, const char* ke
 
         if (strcmp(module->RenderText(), "") != 0) {
             //headingOn = 0;
-            out << "{\"content\": \"" << convertString(module->RenderText()) << "\", ";
-            out << "\"vnumber\": \"" << vk->Verse() << "\", ";
-            out << "\"cnumber\": \"" << vk->Chapter() << "\"";
+            out << "{\"content\": \"" << convertString(module->RenderText()) << "\"";
+            out << ", \"vnumber\": \"" << vk->Verse() << "\"";
+            out << ", \"cnumber\": \"" << vk->Chapter() << "\"";
+            out << ", \"osisRef\": \"" << vk->getOSISRef() << "\"";
+            out << ", \"osisBook\": \"" << vk->getOSISBookName() << "\"";
             if (strcmp(module->getEntryAttributes()["Heading"]["Preverse"]["0"].c_str(), "") != 0)
                 out << ", \"heading\": \"" << module->getEntryAttributes()["Heading"]["Preverse"]["0"].c_str() << "\"";
 
@@ -702,6 +759,43 @@ void AsyncInstallModule(uv_work_t* req) {
     SwordRemoteInstallModule(baton, baton->arg2.c_str(), baton->arg1.c_str());
 }
 
+Handle<Value> GetModuleBCV(const Arguments& args) {
+    HandleScope scope;
+
+    if (!args[0]->IsString()) {
+        ThrowException(Exception::TypeError(String::New("First argument must be a string!")));
+        return scope.Close(Undefined());
+    }
+
+    if (!args[1]->IsFunction()) {
+        return ThrowException(Exception::TypeError(
+            String::New("Second argument must be a callback function")));
+    }
+
+    v8::String::Utf8Value param1(args[0]->ToString());
+
+    Local<Function> callback = Local<Function>::Cast(args[1]);
+
+    Baton* baton = new Baton();
+    baton->error = false;
+    baton->callback = Persistent<Function>::New(callback);
+    baton->arg1 = std::string(*param1);
+
+    uv_work_t *req = new uv_work_t();
+    req->data = baton;
+
+    int status = uv_queue_work(uv_default_loop(), req, AsyncGetModuleBCV,
+                               (uv_after_work_cb)AfterAsyncWork);
+    assert(status == 0);
+
+    return Undefined();
+}
+
+void AsyncGetModuleBCV(uv_work_t* req) {
+    Baton* baton = static_cast<Baton*>(req->data);
+    baton->result = SwordGetModuleBCV(baton, baton->arg1.c_str());
+}
+
 Handle<Value> GetRawText(const Arguments& args) {
     //Get raw text entry specified by a vkey
     HandleScope scope;
@@ -803,6 +897,8 @@ void Init(Handle<Object> exports, Handle<Object> module) {
         FunctionTemplate::New(GetModules)->GetFunction());
     exports->Set(String::NewSymbol("installModule"),
         FunctionTemplate::New(InstallModule)->GetFunction());
+    exports->Set(String::NewSymbol("getModuleBCV"),
+        FunctionTemplate::New(GetModuleBCV)->GetFunction());
     exports->Set(String::NewSymbol("getRawText"),
         FunctionTemplate::New(GetRawText)->GetFunction());
 
