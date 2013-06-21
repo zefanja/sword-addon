@@ -1,4 +1,6 @@
+
 var path = require("path");
+var restify = require('restify');
 
 function getSwordPath() {
     var home = process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE;
@@ -7,6 +9,47 @@ function getSwordPath() {
 process.env["SWORD_PATH"] = getSwordPath();
 
 var sword = require("./build/Release/sword-addon");
+
+//Restify Server
+var server = restify.createServer();
+server.pre(restify.pre.userAgentConnection());
+server.use(restify.bodyParser());
+//set the encoding
+server.use(function(req, res, next) {
+    res.setHeader("content-type", "application/json;charset=utf-8");
+    next();
+});
+
+//** REST API functions **//
+
+//get a list of all installed modules (on the server)
+function getModules(req, res, next) {
+    sword.getModules(function (inError, inModules) {
+        if (inError)
+            return next(inError);
+
+        res.send(JSON.parse(inModules));
+        return next();
+    });
+}
+
+//get the books, chapters and verses in each chapter from a module
+function getModuleBCV(req, res, next) {
+    sword.getModuleBCV(req.params.moduleName, function (inError, inBCV) {
+        if (inError)
+            return next(inError);
+
+        res.send(JSON.parse(inBCV));
+        return next();
+    });
+}
+
+server.get('/modules/', getModules);
+server.get('/modules/:moduleName/bcv', getModuleBCV);
+
+server.listen(1234, "127.0.0.1", function() {
+    console.log('%s listening at %s', server.name, server.url);
+});
 
 /*sword.syncRemoteSources(function(inError){
     //inError is null if there is no error.
@@ -34,11 +77,7 @@ var sword = require("./build/Release/sword-addon");
 }); */
 
 //Get the text entry (HTML) at specific key
-/*sword.getRawText({key: "mt 5", moduleName: "ESV"}, function (inError, inVerses) {
+/*sword.getRawText({key: "gen 1:6", moduleName: "GerNeUe"}, function (inError, inVerses) {
     console.log("%s, inVerse: ", inError, JSON.parse(inVerses)[0]);
 });*/
-
-sword.getModuleBCV("ESV", function (inError, inBCV) {
-    console.log(JSON.parse(inBCV));
-})
 

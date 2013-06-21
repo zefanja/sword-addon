@@ -315,15 +315,15 @@ std::string SwordListModules(SWMgr *otherMgr = 0, bool onlyNewAndUpdates = false
             }
             out << "{\"name\": \"" << module->Name() << "\"";
             out << ", \"datapath\": \"" << module->getConfigEntry("DataPath") << "\"";
-            out << ", \"description\": \"" << module->getConfigEntry("Description") << "\"";
+            out << ", \"description\": \"" << convertString(module->getConfigEntry("Description")) << "\"";
             if (module->getConfigEntry("Lang")) out << ", \"lang\": \"" << module->getConfigEntry("Lang") << "\"";
             if (module->getConfigEntry("Versification")) out << ", \"versification\": \"" << module->getConfigEntry("Versification") << "\"";
             if (module->getConfigEntry("About")) out << ", \"about\": \"" << convertString(module->getConfigEntry("About")) << "\"";
             if (module->getConfigEntry("Version")) out << ", \"version\": \"" << module->getConfigEntry("Version") << "\"";
             if (module->getConfigEntry("InstallSize")) out << ", \"installSize\": \"" << module->getConfigEntry("InstallSize") << "\"";
             if (module->getConfigEntry("Copyright")) out << ", \"copyright\": \"" << convertString(module->getConfigEntry("Copyright")) << "\"";
-            if (module->getConfigEntry("DistributionLicense")) out << ", \"distributionLicense\": \"" << module->getConfigEntry("DistributionLicense") << "\"";
-            if (module->getConfigEntry("Category")) out << ", \"category\": \"" << module->getConfigEntry("Category") << "\"";
+            if (module->getConfigEntry("DistributionLicense")) out << ", \"distributionLicense\": \"" << convertString(module->getConfigEntry("DistributionLicense")) << "\"";
+            if (module->getConfigEntry("Category")) out << ", \"category\": \"" << convertString(module->getConfigEntry("Category")) << "\"";
             out << "}";
         }
     }
