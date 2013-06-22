@@ -14,6 +14,9 @@ var sword = require("./build/Release/sword-addon");
 var server = restify.createServer();
 server.pre(restify.pre.userAgentConnection());
 server.use(restify.bodyParser());
+server.use(restify.queryParser());
+//gzip response
+server.use(restify.gzipResponse());
 //set the encoding
 server.use(function(req, res, next) {
     res.setHeader("content-type", "application/json;charset=utf-8");
@@ -33,6 +36,17 @@ function getModules(req, res, next) {
     });
 }
 
+//get the raw entry (OSIS XML) from a verse key or range
+function getRawText(req, res, next) {
+    sword.getRawText({key: req.params.key, moduleName: req.params.moduleName}, function (inError, inVerses) {
+        if (inError)
+            return next(inError);
+
+        res.send(JSON.parse(inVerses));
+        return next();
+    });
+}
+
 //get the books, chapters and verses in each chapter from a module
 function getModuleBCV(req, res, next) {
     sword.getModuleBCV(req.params.moduleName, function (inError, inBCV) {
@@ -44,8 +58,47 @@ function getModuleBCV(req, res, next) {
     });
 }
 
+//get a list of all available repositories at CrossWire. Add ?sync=false if you don't want to refresh the master list
+function getRepositories(req, res, next) {
+    if (req.query.sync && !JSON.parse(req.query.sync)) {
+        sword.getRemoteSources(function (inError, inSources) {
+            if (inError)
+                return next(inError);
+            res.send(JSON.parse(inSources));
+            return next();
+        });
+    } else {
+        sword.syncRemoteSources(function(inError){
+            if (inError)
+                return next(inError);
+            sword.getRemoteSources(function (inError, inSources) {
+                if (inError)
+                    return next(inError);
+                res.send(JSON.parse(inSources));
+                return next();
+            });
+        });
+    }
+}
+
+//get a list of all available modules in a repository
+function getRemoteModules(req, res, next) {
+    var refresh = (req.query.refresh) ? JSON.parse(req.query.refresh) : true;
+    sword.getRemoteModules({sourceName: req.params.sourceName, refresh: refresh}, function (inError, inModules) {
+        if (inError)
+            return next(inError);
+
+        res.send(JSON.parse(inModules));
+        return next();
+    });
+}
+
 server.get('/modules/', getModules);
+server.get('/modules/:moduleName/:key', getRawText);
 server.get('/modules/:moduleName/bcv', getModuleBCV);
+
+server.get('/repositories/', getRepositories);
+server.get('/repositories/:sourceName', getRemoteModules);
 
 server.listen(1234, "127.0.0.1", function() {
     console.log('%s listening at %s', server.name, server.url);

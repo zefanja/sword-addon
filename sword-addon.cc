@@ -446,7 +446,7 @@ std::string SwordGetRawText(Baton *baton, const char* moduleName, const char* ke
             out << ", \"osisRef\": \"" << vk->getOSISRef() << "\"";
             out << ", \"osisBook\": \"" << vk->getOSISBookName() << "\"";
             if (strcmp(module->getEntryAttributes()["Heading"]["Preverse"]["0"].c_str(), "") != 0)
-                out << ", \"heading\": \"" << module->getEntryAttributes()["Heading"]["Preverse"]["0"].c_str() << "\"";
+                out << ", \"heading\": \"" << convertString(module->getEntryAttributes()["Heading"]["Preverse"]["0"].c_str()) << "\"";
 
             for (i1 = module->getEntryAttributes().begin(); i1 != module->getEntryAttributes().end(); i1++) {
                 if (strcmp(i1->first, "Footnote") == 0) {
